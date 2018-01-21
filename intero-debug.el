@@ -205,10 +205,11 @@
       (progn
         (dolist (line (-filter (lambda (l) (s-present? (s-trim l)))
                                (s-lines breaks-str)))
-          (if (string-match "\\[\\([0-9]+\\)\\] \\([[:alnum:]]+\\) [^:]+:.+" line)
+          (if (string-match "\\[\\([0-9]+\\)\\] \\([[:alnum:]]+\\) \\([^:]+\\):\\(.+\\)" line)
               (let* ((bpnumber (string-to-number (match-string 1 line)))
-                     (path (match-string 2 line))
-                     (region (match-string 3 line)))
+                     (_module (match-string 3 line))
+                     (path (match-string 3 line))
+                     (region (match-string 4 line)))
                 (when (string= file path)
                   (intero-debug-add-breakpoint-overlay bpnumber region)))
             (error "Could not parse break point line %s" line)))))))
@@ -302,16 +303,10 @@
         (message "Removed breakpoint %d" bp-number))
     (intero-debug-add-breakpoint-here)))
 
-;; (defun intero-debug-get-bindings ()
-;;   "Get current bindings"
-
-
-;;   )
-
 (defun intero-debug-show-bindings ()
   "Show active bindings in another window"
   (let* ((bindings (intero-debug-call-intero-blocking ":show bindings")))
-    (with-current-buffer (get-buffer-create "*intero-debug:bindings")
+    (with-current-buffer (get-buffer-create "*intero-debug:bindings*")
       (let ((inhibit-read-only t))
         (setq buffer-read-only t)
         (delete-region (point-min) (point-max))
