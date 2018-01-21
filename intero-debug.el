@@ -120,7 +120,7 @@
     (move-to-column (- column 1))
     (point)))
 
-(defface intero-debug-breakpoint-face
+(defface intero-debug-breakpoint
   '((t (:underline (:color "deep sky blue" :style wave))))
   "Face for breakpoint markers"
   )
@@ -146,6 +146,26 @@
           :start-column start-column
           :end-line end-line
           :end-column end-column)))
+(defun intero-debug-add-breakpoint-overlay (bpnumber region)
+  "Add a breakpoint overlay given the NUMBER of the breakpoint
+  and the REGION string as given by GHCi"
+  (-let* (((&plist :start-line start-line
+                   :start-column start-column
+                   :end-line end-line
+                   :end-column end-column
+                   ) (intero-debug-match-region region))
+          (start (intero-debug-make-buffer-position
+                  start-line start-column))
+          (end (+ (intero-debug-make-buffer-position
+                   end-line end-column)
+                  1))
+          (breakpoint-overlay (make-overlay start end)))
+    (overlay-put breakpoint-overlay 'type 'breakpoint)
+    (overlay-put breakpoint-overlay 'category 'intero-debug)
+    (overlay-put breakpoint-overlay 'breakpoint bpnumber)
+    (overlay-put breakpoint-overlay 'face 'intero-debug-breakpoint)
+    (overlay-put breakpoint-overlay 'help-echo (format "Breakpoint %d" bpnumber))
+    ))
 
 (defun intero-debug-add-breakpoint-here ()
   (interactive)
@@ -153,43 +173,45 @@
          (column (current-column))
          (res (intero-debug-call-intero-blocking
                (format ":break %s %d %d" module line column))))
-    (if (string-match
-         "Breakpoint \\([0-9]+\\) \\(activated\\|was already set\\) at \\([^:]+\\):\\(.+\\)"
-         res)
-        (-let* ((bpnumber (string-to-number (match-string 1 res)))
-                (verb (match-string 2 res))
-                (path (match-string 3 res))
-                (region (match-string 4 res))
-                ((&plist :start-line start-line
-                         :start-column start-column
-                         :end-line end-line
-                         :end-column end-column
-                         )
-                 (intero-debug-match-region region)))
-          (cond
-           ((string= "activated" verb)
-            (let* ((start (intero-debug-make-buffer-position
-                           start-line start-column))
-                   (end (+ (intero-debug-make-buffer-position
-                            end-line end-column)
-                           1))
-                   (breakpoint-overlay (make-overlay start end)))
+    (cond
+     ((string-match
+       "Breakpoint \\([0-9]+\\) \\(activated\\|was already set\\) at \\([^:]+\\):\\(.+\\)"
+       res)
+      (-let* ((bpnumber (string-to-number (match-string 1 res)))
+              (verb (match-string 2 res))
+              (_path (match-string 3 res))
+              (region (match-string 4 res)))
+        (cond
+         ((string= "activated" verb)
+          (intero-debug-add-breakpoint-overlay bpnumber region)
+          (message "Added breakpoint %d" bpnumber))
+        ((string= "was already set" verb)
+         (message "Breakpoint was already set as %d" bpnumber)
+         ;; Breakpoint was already set, nothing to do
+         )
+        (t (error "Could not understand %s in result: %s" verb res))
+        )))
+    ((string-match "Could not find module ‘\\([^’]+\\)’" res)
+     (error "Module %s not loaded" (match-string 1 res)))
+    (t (error "Could not parse result: %s" res)))))
 
-              (overlay-put breakpoint-overlay 'type 'breakpoint)
-              (overlay-put breakpoint-overlay 'category 'intero-debug)
-              (overlay-put breakpoint-overlay 'breakpoint bpnumber)
-              (overlay-put breakpoint-overlay 'face 'intero-debug-breakpoint-face)
-              (overlay-put breakpoint-overlay 'help-echo (format "Breakpoint %d" bpnumber))
-              (message "Added breakpoint %d" bpnumber)
-              ))
-           ((string= "was already set" verb)
-            (message "Breakpoint was already set as %d" bpnumber)
-            ;; Breakpoint was already set, nothing to do
-            )
-           (t (error "Could not understand %s in result: %s" verb res))
-           ))
-      (error "Could not parse result: %s" res)
-      )))
+(defun intero-debug-show-breakpoints ()
+  (interactive)
+  (remove-overlays nil nil 'type 'breakpoint)
+  (-when-let* ((file (buffer-file-name))
+               (breaks-str (intero-debug-call-intero-blocking ":show breaks")))
+    (if (string-match "No Active breakpoints" breaks-str)
+        nil
+      (progn
+        (dolist (line (-filter (lambda (l) (s-present? (s-trim l)))
+                               (s-lines breaks-str)))
+          (if (string-match "\\[\\([0-9]+\\)\\] \\([[:alnum:]]+\\) [^:]+:.+" line)
+              (let* ((bpnumber (string-to-number (match-string 1 line)))
+                     (path (match-string 2 line))
+                     (region (match-string 3 line)))
+                (when (string= file path)
+                  (intero-debug-add-breakpoint-overlay bpnumber region)))
+            (error "Could not parse break point line %s" line)))))))
 
 (defun intero-debug-clear-breakpoints ()
   (interactive)
@@ -221,8 +243,8 @@
   (intero-debug-remove-breakpoint-here)
   )
 
-(defface intero-debug-current-context-face
-  '((t (:background "chocolate4")))
+(defface intero-debug-current-context
+  '((t :inherit highlight))
   "Face for the current debug context")
 
 (defun intero-debug--clear-context-overlays ()
@@ -231,35 +253,32 @@
 (defun intero-debug--get-context ()
   "Get the current debug context or nil if we there is no active computation"
   (let ((ctx-string (s-trim (intero-debug-call-intero-blocking ":show context"))))
-    (if (s-blank? ctx-string)
-        nil
-      ctx-string)))
+    (if (string-match "Stopped in \\([^,]+\\), \\([^:]+\\):\\(.+\\)" ctx-string)
+        ctx-string)))
 
 (defun intero-debug-goto-context ()
   "Find and mark current debug context"
   (interactive)
   (intero-debug--clear-context-overlays)
-  (-if-let (ctx (intero-debug--get-context))
-    (if (string-match "Stopped in \\([^,]+\\), \\([^:]+\\):\\(.+\\)" ctx)
-        (-let* ((binding (match-string 1 ctx))
-                (file (match-string 2 ctx))
-                ((&plist :start-line start-line
-                         :start-column start-column
-                         :end-line end-line
-                         :end-column end-column
-                         )
-                 (intero-debug-match-region
-                  (match-string 3 ctx)))
-                )
-          (find-file file)
-          (let* ((start (intero-debug-make-buffer-position start-line start-column))
-                 (end (+ (intero-debug-make-buffer-position end-line end-column) 1))
-                 (ctx-overlay (make-overlay start end)))
-            (overlay-put ctx-overlay 'category 'intero-debug)
-            (overlay-put ctx-overlay 'type 'intero-debug-context)
-            (overlay-put ctx-overlay 'face 'intero-debug-current-context-face)
-            (goto-char start)))
-      (message "Not in a debug context"))
+  (-if-let* ((ctx (intero-debug--get-context)))
+      (-let* ((binding (match-string 1 ctx))
+              (file (match-string 2 ctx))
+              ((&plist :start-line start-line
+                       :start-column start-column
+                       :end-line end-line
+                       :end-column end-column
+                       )
+               (intero-debug-match-region
+                (match-string 3 ctx)))
+              )
+        (find-file file)
+        (let* ((start (intero-debug-make-buffer-position start-line start-column))
+               (end (+ (intero-debug-make-buffer-position end-line end-column) 1))
+               (ctx-overlay (make-overlay start end)))
+          (overlay-put ctx-overlay 'category 'intero-debug)
+          (overlay-put ctx-overlay 'type 'intero-debug-context)
+          (overlay-put ctx-overlay 'face 'intero-debug-current-context)
+          (goto-char start)))
     (message "Not in a debug context")))
 
 (defun intero-debug-step ()
@@ -324,11 +343,17 @@
 
 (defvar intero-debug-mode-map (make-sparse-keymap))
 
-
+(defun intero-debug-quit ()
+  (interactive)
+  (when (and (intero-debug--get-context)
+             (yes-or-no-p "Abandon current computation?"))
+    (intero-debug-abandon))
+  (intero-debug-mode -1))
 
 (define-key intero-debug-mode-map (kbd "b") 'intero-debug-toggle-breakpoint)
 (define-key intero-debug-mode-map (kbd "g") 'intero-debug-goto-context)
 (define-key intero-debug-mode-map (kbd "a") 'intero-debug-abandon)
+(define-key intero-debug-mode-map (kbd "q") 'intero-debug-quit)
 
 (define-key intero-debug-mode-map (kbd "C-p") 'intero-debug-history-forward)
 (define-key intero-debug-mode-map (kbd "C-n") 'intero-debug-history-back)
@@ -344,8 +369,9 @@
   :group 'haskell
   (if intero-debug-mode
       (progn
-        (setq buffer-read-only nil)
-        (remove-overlays nil nil 'category 'intero-debug))
+        (setq buffer-read-only t)
+        (when (intero-debug--get-context)
+          (intero-debug-goto-context)))
     (progn
-      (setq buffer-read-only t)
-      (intero-debug-goto-context))))
+      (setq buffer-read-only nil)
+      (remove-overlays nil nil 'category 'intero-debug))))
