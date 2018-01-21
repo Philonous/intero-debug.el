@@ -75,7 +75,7 @@
         (progn
           (delete-region (point-min) input-marker-end)
           (-if-let (cont (pop intero-debug-return-functions))
-              (or (funcall cont str) "")
+              (or (funcall cont (intero-debug--strip-debug-prompt str)) "")
             input))
       ""
       )))
@@ -100,6 +100,19 @@
              intero-debug-return-functions
              (list callback)))
       (comint-simple-send proc str))))
+
+(defun intero-debug--has-debug-prompt (str)
+  (string-match "\\`\\(\\(?:.\\|\n\\)+\\)\\[[^:]+:[^]]+\\][ ]+\\'"
+                str))
+
+
+(defun intero-debug--strip-debug-prompt (str)
+  "Strip the last line when it looks like a debug prompt, e.g.
+\"[/path/to/project/Test.hs:392:16-29] \"
+"
+  (if (intero-debug--has-debug-prompt str)
+      (match-string 1 str)
+    str))
 
 (defun intero-debug-call-intero-blocking (command)
   (let ((res nil))
@@ -146,6 +159,7 @@
           :start-column start-column
           :end-line end-line
           :end-column end-column)))
+
 (defun intero-debug-add-breakpoint-overlay (bpnumber region)
   "Add a breakpoint overlay given the NUMBER of the breakpoint
   and the REGION string as given by GHCi"
@@ -289,10 +303,6 @@
   (intero-debug-goto-context)
   (intero-debug-show-bindings))
 
-(defun intero-debug-is-breakpoint ()
-
-  )
-
 (defun intero-debug-toggle-breakpoint ()
   "Toggle breakpoint here"
   (interactive)
@@ -345,8 +355,17 @@
     (intero-debug-abandon))
   (intero-debug-mode -1))
 
+(defun intero-debug-refresh ()
+  "Refresh the interactive debug display, i.e. breakpoints and
+the current debug context"
+  (interactive)
+  (intero-debug-show-breakpoints)
+  (when (intero-debug--get-context)
+    (intero-debug-goto-context)
+    (intero-debug-show-bindings)))
+
 (define-key intero-debug-mode-map (kbd "b") 'intero-debug-toggle-breakpoint)
-(define-key intero-debug-mode-map (kbd "g") 'intero-debug-goto-context)
+(define-key intero-debug-mode-map (kbd "g") 'intero-debug-refresh)
 (define-key intero-debug-mode-map (kbd "a") 'intero-debug-abandon)
 (define-key intero-debug-mode-map (kbd "q") 'intero-debug-quit)
 
@@ -365,8 +384,7 @@
   (if intero-debug-mode
       (progn
         (setq buffer-read-only t)
-        (when (intero-debug--get-context)
-          (intero-debug-goto-context)))
+        (intero-debug-refresh))
     (progn
       (setq buffer-read-only nil)
       (remove-overlays nil nil 'category 'intero-debug))))
