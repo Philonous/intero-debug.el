@@ -3,6 +3,10 @@
 (require 'dash)
 (require 's)
 
+(defgroup intero-debug nil
+  "intero/GHCi debugger integration"
+  :group 'haskell)
+
 ;; (defun intero-debug-get-buffer-create ()
 ;;   (-when-let* ((buffer (get-buffer-create "*haskell debugging*"))
 ;;                (source-buffer (intero-))
@@ -52,7 +56,8 @@
 
 (defcustom intero-debug-auto-start-debug-mode t
   "Automatically switch to debug mode when GHCi indicates that we
-  are stopped in a computation")
+  are stopped in a computation"
+  :group 'intero-debug)
 
 (defconst intero-debug-stopped-context-regexp
   "\\`Stopped in \\([[:alnum:]]+\\)\\([^,]+\\), \\([^:]+\\):\\(.\\)+$")
@@ -160,6 +165,7 @@
 (defface intero-debug-breakpoint
   '((t (:underline (:color "deep sky blue" :style wave))))
   "Face for breakpoint markers"
+  :group 'intero-debug
   )
 
 (defun intero-debug-match-region (str)
@@ -284,7 +290,9 @@
 
 (defface intero-debug-current-context
   '((t :inherit highlight))
-  "Face for the current debug context")
+  "Face for the current debug context"
+  :group 'intero-debug
+  )
 
 (defun intero-debug--clear-context-overlays ()
   (remove-overlays nil nil 'type 'intero-debug-context))
@@ -370,8 +378,6 @@
   (intero-debug-goto-context)
   (intero-debug-show-bindings))
 
-(defvar intero-debug-mode-map (make-sparse-keymap))
-
 (defun intero-debug-quit ()
   (interactive)
   (when (and (intero-debug--get-context)
@@ -387,6 +393,8 @@ the current debug context"
   (when (intero-debug--get-context)
     (intero-debug-goto-context)
     (intero-debug-show-bindings)))
+
+(defvar intero-debug-mode-map (make-sparse-keymap))
 
 (define-key intero-debug-mode-map (kbd "b") 'intero-debug-toggle-breakpoint)
 (define-key intero-debug-mode-map (kbd "g") 'intero-debug-refresh)
@@ -404,7 +412,7 @@ the current debug context"
 \\<intero-debug-mode-map>
 "
   :lighter " Debug"
-  :group 'haskell
+  :group 'intero-debug
   (if intero-debug-mode
       (progn
         (setq buffer-read-only t)
