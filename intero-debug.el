@@ -47,13 +47,29 @@
 
 
 (defvar intero-debug-return-functions nil)
-;; (defvar intero-debug--stream-output nil)
+(defvar intero-debug--stream-output nil
+  "Should we stream output?")
 
-;; (defun intero-debug-check-debug-context (str)
-;;   "Check if we are in a debug context, and if yes start debug mode"
-;;   ;; Reset output streaming
-;;   (setq intero-debug--stream-output nil)
-;;   (message "%s" str))
+(defcustom intero-debug-auto-start-debug-mode t
+  "Automatically switch to debug mode when GHCi indicates that we
+  are stopped in a computation")
+
+(defconst intero-debug-stopped-context-regexp
+  "\\`Stopped in \\([[:alnum:]]+\\)\\([^,]+\\), \\([^:]+\\):\\(.\\)+$")
+
+(defun intero-debug--check-debug-context (str)
+  "Check if we are in a debug context, and if yes start debug mode"
+  ;; Reset output streaming
+  (setq intero-debug--stream-output nil)
+  (when (string-match intero-debug-stopped-context-regexp str)
+    (message "checking context %s" str)
+    (-let* ((_module (match-string 1 str))
+            (_item (match-string 2 str))
+            (path (match-string 3 str))
+            (region (match-string 4 str)))
+      (save-window-excursion
+        (find-file path)
+        (intero-debug-mode t)))))
 
 ;;; Filter function that writes all incoming text into a buffer until we see "\4
 ;;; " (intero's prompt marker), then pass the entire section to the first
@@ -61,24 +77,29 @@
 (defun intero-debug-comint-filter-fun (input)
   (with-current-buffer (get-buffer-create "haskell:debug:comint")
     ;; If no function is waiting for input install the default function
-    ;; (unless intero-debug-return-functions
-    ;;   ;; Stream output while we're wating
-    ;;   (setq intero-debug--stream-output t)
-    ;;   (push intero-debug-return-functions
-    ;;         'intero-debug-check-debug-context))
+    (unless intero-debug-return-functions
+      ;; Stream output while we're wating
+      (setq intero-debug--stream-output t)
+      (push #'intero-debug--check-debug-context
+            intero-debug-return-functions))
     (goto-char (point-max))
     (insert input)
     (goto-char (point-min))
-    (-if-let* ((input-marker-end (search-forward "\4 " nil t))
-               (input-end (- input-marker-end 2))
-               (str (buffer-substring-no-properties (point-min) input-end)))
-        (progn
-          (delete-region (point-min) input-marker-end)
-          (-if-let (cont (pop intero-debug-return-functions))
-              (or (funcall cont (intero-debug--strip-debug-prompt str)) "")
-            input))
-      ""
-      )))
+    (let ((streaming intero-debug--stream-output)
+          (command-output
+           (-if-let* ((input-marker-end (search-forward "\4 " nil t))
+                      (input-end (- input-marker-end 2))
+                      (str (buffer-substring-no-properties (point-min) input-end)))
+               (progn
+                 (delete-region (point-min) input-marker-end)
+                 (-if-let (cont (pop intero-debug-return-functions))
+                     (or (funcall cont (intero-debug--strip-debug-prompt str)) "")
+                   input))
+             ""
+             )))
+      (if streaming
+          input
+        (or command-output "")))))
 
 
 (defun intero-debug-install-filter-fun ()
@@ -102,9 +123,12 @@
       (comint-simple-send proc str))))
 
 (defun intero-debug--has-debug-prompt (str)
-  (string-match "\\`\\(\\(?:.\\|\n\\)+\\)\\[[^:]+:[^]]+\\][ ]+\\'"
+  (string-match "\\`\\(\\(?:.\\|\n\\)+\\)\\[\\([^:]+:[^]]+\\)\\][ ]+\\'"
                 str))
 
+(defun intero-debug--get-debug-prompt (str)
+  (when (intero-debug--has-debug-prompt str)
+    (match-string 2 str)))
 
 (defun intero-debug--strip-debug-prompt (str)
   "Strip the last line when it looks like a debug prompt, e.g.
