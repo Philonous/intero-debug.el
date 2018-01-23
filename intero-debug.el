@@ -1,54 +1,17 @@
 ;;; -*- lexical-binding: t -*-
 
+
+;;; At this point this library tries to interact with the same intero process
+;;; that provides the repl (See get-haskell-buffer). This makes it easier to
+;;; interact with the debugging process (just issue commands as usual) but makes
+;;; the interaction more brittle.
+
 (require 'dash)
 (require 's)
 
 (defgroup intero-debug nil
   "intero/GHCi debugger integration"
   :group 'haskell)
-
-;; (defun intero-debug-get-buffer-create ()
-;;   (-when-let* ((buffer (get-buffer-create "*haskell debugging*"))
-;;                (source-buffer (intero-))
-;;                (targets (with-current-buffer (intero-))))
-;;     (targets )
-;;     (with-current-buffer buffer
-;;       (unless (process-live-p (get-buffer-process (current-buffer)))
-;;         (intero-start-process-in-buffer buffer)))))
-
-;; (defun intero-debug-setup ()
-;;   (let* ((targets nil))
-;;     (when-let ((intero-repl-buffer (get-haskell-buffer)))
-;;       (with-current-buffer intero-repl-buffer
-;;         (setq targets intero-targets)))
-;;     (let ((filename (buffer-file-name)))
-;;       (when-let (backend-buffer (intero-buffer-p 'backend))
-;;         (with-current-buffer (intero-get-buffer-create 'debug)
-;;           (set (make-variable-buffer-local 'intero-targets) targets)))
-;;       (intero-restart)
-;;       (intero-blocking-call 'debug ":set -fbyte-code")
-;;       (message (intero-blocking-call 'debug (format ":load %s" filename)))
-;;       (message (intero-blocking-call 'debug (format ":show modules" filename))))))
-
-(defun intero-debug-guess-module-name ()
-  "Guess the module name of the current buffer"
-  (save-excursion
-    (goto-char (point-min))
-    (if (re-search-forward "^[ ]*module[ ]+\\([.[:alnum:]]+\\)" nil t)
-        (match-string-no-properties 1)
-      "Main")))
-
-
-;; (defun intero-debug-add-breakpoint ()
-;;   (interactive)
-;;   (let* ((module (intero-debug-guess-module-name))
-;;          (line (line-number-at-pos))
-;;          (column (current-column)))
-;;     (when-let ((haskell-buffer (get-haskell-buffer))
-;;                (proc (get-buffer-process haskell-buffer)))
-;;       (with-current-buffer haskell-buffer
-;;         (comint-simple-send proc (format ":break %s %s %s" module line column))))))
-
 
 (defvar intero-debug-return-functions nil)
 (defvar intero-debug--stream-output nil
@@ -60,21 +23,40 @@
   :group 'intero-debug)
 
 (defconst intero-debug-stopped-context-regexp
-  "\\`Stopped in \\([[:alnum:]]+\\)\\([^,]+\\), \\([^:]+\\):\\(.\\)+$")
+  "^Stopped in \\([[:alnum:]]+\\)\\([^,]+\\), \\([^:]+\\):\\(.\\)+$")
+
+
+(defun get-haskell-buffer ()
+  (save-window-excursion
+    (if (bound-and-true-p intero-mode)
+        (intero-repl-buffer nil t)
+      (let ((sess (haskell-session)))
+        (if sess (haskell-session-interactive-buffer sess)
+          nil)))))
+
+(defun intero-debug-guess-module-name ()
+  "Guess the module name of the current buffer"
+  (save-excursion
+    (goto-char (point-min))
+    (if (re-search-forward "^[ ]*module[ ]+\\([.[:alnum:]]+\\)" nil t)
+        (match-string-no-properties 1)
+      "Main")))
 
 (defun intero-debug--check-debug-context (str)
   "Check if we are in a debug context, and if yes start debug mode"
-  ;; Reset output streaming
+  ;; Disable output streaming. This function should run when the current command
+  ;; has completed, so don't need to stream any more
   (setq intero-debug--stream-output nil)
-  (when (string-match intero-debug-stopped-context-regexp str)
-    (message "checking context %s" str)
+  ;; Check to see if we have stopped in a debug context and automatically enable
+  ;; debug mode
+  (when (and intero-debug-auto-start-debug-mode
+             (string-match intero-debug-stopped-context-regexp str))
     (-let* ((_module (match-string 1 str))
             (_item (match-string 2 str))
             (path (match-string 3 str))
             (region (match-string 4 str)))
-      (save-window-excursion
-        (find-file path)
-        (intero-debug-mode t)))))
+      (find-file path)
+      (intero-debug-mode t))))
 
 ;;; Filter function that writes all incoming text into a buffer until we see "\4
 ;;; " (intero's prompt marker), then pass the entire section to the first
@@ -83,14 +65,15 @@
   (with-current-buffer (get-buffer-create "haskell:debug:comint")
     ;; If no function is waiting for input install the default function
     (unless intero-debug-return-functions
-      ;; Stream output while we're wating
+      ;; Stream output while no function is waiting for input
       (setq intero-debug--stream-output t)
       (push #'intero-debug--check-debug-context
             intero-debug-return-functions))
     (goto-char (point-max))
     (insert input)
     (goto-char (point-min))
-    (let ((streaming intero-debug--stream-output)
+    (let ((streaming intero-debug--stream-output)  ; Cache because result
+                                                   ; function might change it
           (command-output
            (-if-let* ((input-marker-end (search-forward "\4 " nil t))
                       (input-end (- input-marker-end 2))
@@ -108,6 +91,7 @@
 
 
 (defun intero-debug-install-filter-fun ()
+  "Installs the filter handler in the intero process"
   (when-let ((intero-repl-buffer (get-haskell-buffer))
              (proc (get-buffer-process intero-repl-buffer)))
     (with-current-buffer intero-repl-buffer
@@ -116,7 +100,8 @@
         (push 'intero-debug-comint-filter-fun
               comint-preoutput-filter-functions)))))
 
-(defun intero-debug-call-intero-async (str callback)
+(defun intero-debug-call-intero-async (command callback)
+  "Issue COMMAND to the intero process and pass output to CALLBACK."
   (when-let ((intero-repl-buffer (get-haskell-buffer))
              (proc (get-buffer-process intero-repl-buffer)))
     (intero-debug-install-filter-fun)
@@ -125,37 +110,37 @@
             (append
              intero-debug-return-functions
              (list callback)))
-      (comint-simple-send proc str))))
+      (comint-simple-send proc command))))
 
-(defun intero-debug--has-debug-prompt (str)
-  (string-match "\\`\\(\\(?:.\\|\n\\)+\\)\\[\\([^:]+:[^]]+\\)\\][ ]+\\'"
-                str))
-
-(defun intero-debug--get-debug-prompt (str)
-  (when (intero-debug--has-debug-prompt str)
-    (match-string 2 str)))
+(defconst intero-debug--debug-prompt-regexp
+  "\\`\\(\\(?:.\\|\n\\)+\\)\\[\\([^:]+:[^]]+\\)\\][ ]+\\'"
+  "Matches GHCi debug prompt, e.g.
+[/path/to/project/Test.hs:392:16-29]
+"
+  )
 
 (defun intero-debug--strip-debug-prompt (str)
   "Strip the last line when it looks like a debug prompt, e.g.
 \"[/path/to/project/Test.hs:392:16-29] \"
 "
-  (if (intero-debug--has-debug-prompt str)
+  (if (string-match intero-debug--debug-prompt-regexp str)
       (match-string 1 str)
     str))
 
 (defun intero-debug-call-intero-blocking (command)
+  "Issue COMMAND to intero and wait for output"
   (let ((res nil))
     (intero-debug-call-intero-async
      command
      (lambda (str)
        (setq res str)
-       nil
-       ))
+       nil))
     (while (not res)
       (sleep-for 0.01))
     res))
 
 (defun intero-debug-make-buffer-position (line column)
+  "Create a buffer position from LINE and COLUMN in current buffer"
   (save-excursion
     (goto-char (point-min))
     (forward-line (- line 1))
@@ -169,6 +154,9 @@
   )
 
 (defun intero-debug-match-region (str)
+  "Match STR as GHCi region, e.g. \"34:7-19\" or \"(34:7)-(55:19)\"
+and return a plist with :start-line, :start-column, :end-line and :end-column
+ "
   (let ((start-line nil)
         (end-line nil)
         (start-column nil)
@@ -212,6 +200,7 @@
     ))
 
 (defun intero-debug-add-breakpoint-here ()
+  "Add a breakpoint at point"
   (interactive)
   (let* ((module (intero-debug-guess-module-name)) (line (line-number-at-pos))
          (column (current-column))
@@ -240,6 +229,8 @@
     (t (error "Could not parse result: %s" res)))))
 
 (defun intero-debug-show-breakpoints ()
+  "Request list of breakpoints from GHCi and mark them in the
+current buffer"
   (interactive)
   (remove-overlays nil nil 'type 'breakpoint)
   (-when-let* ((file (buffer-file-name))
@@ -259,16 +250,19 @@
             (error "Could not parse break point line %s" line)))))))
 
 (defun intero-debug-clear-breakpoints ()
+  "Remove all breakpoints"
   (interactive)
   (intero-debug-call-intero-blocking ":delete *")
   (remove-overlays nil nil 'type 'breakpoint))
 
 (defun inter-debug--get-breakpoint-here ()
+  "Get one breakpoint overlay at point"
   (-first (lambda (o)
             (eq 'breakpoint (overlay-get o 'type)))
           (overlays-at (point))))
 
 (defun intero-debug-remove-breakpoint (o)
+  "Remove breakpoint belonging to overlay O"
   (-if-let (bpnumber (overlay-get o 'breakpoint))
       (progn
         (intero-debug-call-intero-blocking
@@ -277,16 +271,11 @@
     (message "Overlay did not have breakpoint attached")))
 
 (defun intero-debug-remove-breakpoints-here ()
+  "Remove one breakpoint at point"
   (interactive)
   (dolist (o (overlays-at (point)))
     (when (eq (overlay-get o 'type) 'breakpoint)
       (intero-debug-remove-breakpoint o))))
-
-(defun test ()
-  (intero-debug-clear-breakpoints)
-  (intero-debug-add-breakpoint)
-  (intero-debug-remove-breakpoint-here)
-  )
 
 (defface intero-debug-current-context
   '((t :inherit highlight))
@@ -295,6 +284,7 @@
   )
 
 (defun intero-debug--clear-context-overlays ()
+  "Remove all overlays that indicate debug contexts"
   (remove-overlays nil nil 'type 'intero-debug-context))
 
 (defun intero-debug--get-context ()
@@ -336,7 +326,7 @@
   (intero-debug-show-bindings))
 
 (defun intero-debug-toggle-breakpoint ()
-  "Toggle breakpoint here"
+  "Toggle breakpoint at point"
   (interactive)
   (-if-let* ((bp-overlay (inter-debug--get-breakpoint-here))
              (bp-number (overlay-get bp-overlay 'breakpoint)))
@@ -378,11 +368,12 @@
   (intero-debug-goto-context)
   (intero-debug-show-bindings))
 
-(defun intero-debug-quit ()
-  (interactive)
-  (when (and (intero-debug--get-context)
-             (yes-or-no-p "Abandon current computation?"))
-    (intero-debug-abandon))
+(defun intero-debug-quit (&optional abandon)
+  "Quit the interactive debug session. Abandons the computation
+if ABANDON is set."
+  (interactive (list (and (intero-debug--get-context)
+                          (y-or-n-p "Abandon current computation?"))))
+  (when abandon (intero-debug-abandon))
   (intero-debug-mode -1))
 
 (defun intero-debug-refresh ()
@@ -420,3 +411,5 @@ the current debug context"
     (progn
       (setq buffer-read-only nil)
       (remove-overlays nil nil 'category 'intero-debug))))
+
+(provide 'intero-debug)
